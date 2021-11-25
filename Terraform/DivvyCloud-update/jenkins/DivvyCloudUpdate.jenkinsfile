@@ -1,0 +1,122 @@
+import groovy.json.*
+import jenkins.model.*
+
+pipeline {
+        agent { 
+            label 'master'
+        }
+        tools {
+            terraform 'terraform-0.13.2'
+        }
+        parameters {
+            string(
+                name: 'Random_RDS_Password_Length',
+                description: "Length of RDS password. Enter numeric value greater than or equal to 20",             
+                defaultValue: '20', 
+                trim: true
+            )
+            string(
+                name: 'Divvy_Cloud_Version', 
+                description: 'Version of Divvy Cloud to be updated', 
+                defaultValue: 'v20.5.2', 
+                trim: true
+            )
+            choice(
+                    name: 'Terraform_Action',
+                    choices: ['destroy', 'apply', 'show'],
+                    description: '''Terraform Plan will create a plan of resources to be deployed, but would not deploy the resources. Terraform Apply will deploy the resources as per the Terraform Plan'''
+            )
+        }
+        stages { 
+                stage('Git Checkout') {
+                        steps {                               
+                                checkout scm
+                        }
+                }
+                stage('CF Stack Opreation ') {
+                 steps {
+                 sh '''#!/bin/bash -xe
+
+                CURRENT_DIRECTORY=$PWD
+          
+                echo $CURRENT_DIRECTORY
+                ROLE="arn:aws:iam::643608447313:role/toolchain-dr-deployment-role"
+                aws sts assume-role --role-arn $ROLE --role-session-name TemporarySessionKeys --output json > assume-role-output.json
+		
+                export AWS_ACCESS_KEY_ID=$(jq -r '.Credentials.AccessKeyId' assume-role-output.json)
+                export AWS_SECRET_ACCESS_KEY=$(jq -r '.Credentials.SecretAccessKey' assume-role-output.json)
+                export AWS_SESSION_TOKEN=$(jq -r '.Credentials.SessionToken' assume-role-output.json)
+                export AWS_DEFAULT_REGION="us-west-2"
+                
+                aws s3api list-buckets
+		
+                cd $CURRENT_DIRECTORY/Terraform/DivvyCloud-update/terraform/
+		
+                                                   if [ -z $Random_RDS_Password_Length ]
+                                                   then
+                                                           Random_RDS_Password_Length=20
+                                                   fi
+                                                   if [ -z $Divvy_Cloud_Version ]
+                                                   then
+                                                           Divvy_Cloud_Version="v20.3.1"
+                                                   fi
+                                                   sed -i -e "s|rds_passwd_length|${Random_RDS_Password_Length}|g" ./terraform.tfvars
+                                                   sed -i -e "s|dc_vrsn|${Divvy_Cloud_Version}|g" ./terraform.tfvars                                       
+                                                   cat ./terraform.tfvars
+						   terraform init -no-color -input=false
+						   terraform validate -json
+						   terraform plan -no-color -input=false -out=tfplan
+						   terraform apply -no-color -input=false -auto-approve
+						   #terraform destroy -no-color -input=false -auto-approve
+						   
+                '''
+                }
+        }  
+         
+               
+                stage('Terraform apply') {
+                        steps {                        
+                                script {
+                                        if (env.Terraform_Action == "apply") {
+                                                sh (
+                                                        label: 'Apply the generated Terraform Plan', 
+                                                        script: '''CURRENT_DIRECTORY=`pwd`
+					                           cd $CURRENT_DIRECTORY/Terraform/DivvyCloud-update/terraform/
+                                                                   
+                                                                '''
+                                                ) 
+                                        }
+                                        else {
+                                                echo 'The Terraform apply stage skipped as Terraform_Action: ' + env.Terraform_Action
+                                        }
+                                }
+                        }
+                }
+                stage('Terraform show') {
+                        steps {                        
+                                script {
+                                        if (env.Terraform_Action == "destroy") {
+                                                sh (
+                                                        label: 'Show resources deployed via Terraform', 
+                                                        script: '''CURRENT_DIRECTORY=`pwd`
+							           cd $CURRENT_DIRECTORY/Terraform/DivvyCloud-update/terraform/
+							           terraform destroy -no-color -input=false -auto-approve
+                                                               '''
+                                                ) 
+                                        }
+                                        
+                                }
+                        }
+                }
+        }
+	// post {
+        //     always {
+        //         sh (
+        //             label: 'Cleaning up Workspace', 
+        //            script: '''echo "Cleaning up Workspace"                                                   
+        //                        rm -rf *.*'''
+        //         )    
+        //         deleteDir()                                                    
+        //     }
+    	//}
+}   

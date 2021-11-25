@@ -1,0 +1,131 @@
+import groovy.json.*
+import jenkins.model.*
+
+pipeline {
+        agent { 
+            label 'master'
+        }
+        tools {
+            terraform 'terraform-0.13.2'
+        }
+        parameters {
+            string(
+                name: 'Random_RDS_Password_Length',
+                description: "Length of RDS password. Enter numeric value greater than or equal to 20",             
+                defaultValue: '20', 
+                trim: true
+            )
+            string(
+                name: 'Divvy_Cloud_Version', 
+                description: 'Version of Divvy Cloud to be updated', 
+                defaultValue: 'v20.6.3', 
+                trim: true
+            )
+            choice(
+                    name: 'Terraform_Action',
+                    choices: ['plan', 'apply', 'show'],
+                    description: '''Terraform Plan will create a plan of resources to be deployed, but would not deploy the resources. Terraform Apply will deploy the resources as per the Terraform Plan'''
+            )
+        }
+        stages { 
+                stage('Git Checkout') {
+                        steps {                               
+                                checkout scm
+                        }
+                } 
+                stage('Inject Jenkins Paramter Values into terrform.tfvars') {
+                        steps {
+                                sh (
+                                        label: 'Inject Jenkins Paramter Values into terrform.tfvars', 
+                                        script: '''cd ./DivvyCloud-update/Dev/terraform/
+                                                   if [ -z $Random_RDS_Password_Length ]
+                                                   then
+                                                           Random_RDS_Password_Length=20
+                                                   fi
+                                                   if [ -z $Divvy_Cloud_Version ]
+                                                   then
+                                                           Divvy_Cloud_Version="v20.3.1"
+                                                   fi
+                                                   sed -i -e "s|rds_passwd_length|${Random_RDS_Password_Length}|g" ./terraform.tfvars
+                                                   sed -i -e "s|dc_vrsn|${Divvy_Cloud_Version}|g" ./terraform.tfvars                                       
+                                                   cat ./terraform.tfvars'''
+                                )
+                        }               
+                } 
+                stage('Terraform init') {
+                        steps {
+                                sh (
+                                        label: 'Initializing Terraform with S3 Remote Backend', 
+                                        script: '''cd ./DivvyCloud-update/Dev/terraform/
+                                        rm -rf .terraform
+                                        aws s3api get-object --bucket cxloyalty-application-artifacts-dev --key terraform.zip .terraform.zip
+                                        unzip .terraform.zip
+                                        chmod -R 755 .terraform
+                                        terraform --version
+                                        terraform init -no-color -input=false'''
+                                )                        
+                        }
+                    
+                }
+                stage('Terraform validate') {
+                        steps {
+                                sh (
+                                        label: 'Initializing Terraform with S3 Remote Backend', 
+                                        script: '''cd ./DivvyCloud-update/Dev/terraform/
+                                                   terraform validate -json'''
+                                )                        
+                        }
+                    
+                }
+                stage('Terraform plan') {     
+                        steps {                           
+                                sh (
+                                        label: 'Generating Terraform plan locally', 
+                                        script: '''cd ./DivvyCloud-update/Dev/terraform/
+                                                   terraform plan -no-color -input=false -out=tfplan'''
+                                )                       
+                        }
+                }
+                stage('Terraform apply') {
+                        steps {                        
+                                script {
+                                        if (env.Terraform_Action == "apply") {
+                                                sh (
+                                                        label: 'Apply the generated Terraform Plan', 
+                                                        script: '''cd ./DivvyCloud-update/Dev/terraform/ 
+                                                                terraform apply -no-color -input=false -auto-approve "tfplan"'''
+                                                ) 
+                                        }
+                                        else {
+                                                echo 'The Terraform apply stage skipped as Terraform_Action: ' + env.Terraform_Action
+                                        }
+                                }
+                        }
+                }
+                stage('Terraform show') {
+                        steps {                        
+                                script {
+                                        if (env.Terraform_Action != "plan") {
+                                                sh (
+                                                        label: 'Show resources deployed via Terraform', 
+                                                        script: '''cd ./DivvyCloud-update/Dev/terraform/ 
+                                                                terraform show -no-color | sed -e "/id/d" | sed -e "/result/d" | sed -e "/secretsmanager/d"'''
+                                                ) 
+                                        }
+                                        else {
+                                                echo 'The Terraform show stage skipped as Terraform_Action: ' + env.Terraform_Action
+                                        }
+                                }
+                        }
+                }
+        }
+	post {
+            always {
+                sh (
+                    label: 'Cleaning up Workspace', 
+                    script: '''echo "Cleaning up Workspace"'''
+                )    
+                cleanWs(cleanWhenNotBuilt: false, deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true)
+            }
+    	}
+}   

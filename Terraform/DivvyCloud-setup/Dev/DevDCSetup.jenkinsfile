@@ -1,0 +1,78 @@
+ properties(
+	[
+		parameters(
+			[
+				[ 
+					$class: 'ChoiceParameter',
+					choiceType: 'PT_SINGLE_SELECT',
+					description: 'DivvyCloud UP/DOWN',
+					name: 'DC_SETUP',
+					script:
+						[ 
+							$class: 'GroovyScript',
+							fallbackScript:
+								[ 
+									classpath: [], 
+									sandbox: false, 
+									script: "return['Error']"								
+								],
+							script:
+								[ 
+									classpath: [], 
+									sandbox: false, 
+									script: '''#!/usr/bin/env groovy
+import groovy.json.JsonSlurperClassic
+import jenkins.model.Jenkins											
+def getDCInfraStatus() {
+	def command = [""]					
+	command = ["/bin/bash", "-c", """aws ec2 describe-instances --output json --filters "Name=tag-value,Values=DevDivvyCloud" --query "Reservations[*].Instances[*].{Instance:InstanceId,State:State.Name}" | jq ".[0][0].State" | cut -d'"' -f2 """]																						
+	def proc = command.execute()
+	proc.waitFor()										
+	status = proc.in.text.readLines()
+	if (status.get(0).equals("running")) {  
+		return ["Shutdown-DivvyCloud"]
+	}
+	else {
+		return ["Start-DivvyCloud"]												    
+	}
+	return ["Error"]
+}
+def status = getDCInfraStatus()
+return status'''	
+								]
+						]
+				],
+				[
+					$class: 'StringParameterDefinition',
+					description: 'DivvyCloud ALB Target Group',
+					name: 'DC_Target_Group_Name',
+                    defaultValue: 'divvycloud-lb-tg'
+				]
+			]
+		)
+	]
+)
+pipeline {
+	agent {
+		label "master"
+	}
+	stages {
+		stage("DC-Setup") {
+			when {
+				expression {
+					DC_SETUP != "Error" 
+				}
+			}
+			steps {
+				script {
+					sh(
+						label:"",
+						returnStdout: false,
+						returnStatus: false,
+						script: '''python DivvyCloud-setup/Dev/setupDC.py --Status $DC_SETUP --Region us-east-1 --TagValue DivvyCloud --TargetGroup $DC_Target_Group_Name --IAMRole "arn:aws:iam::982267650803:role/CXCloudformationJenkins"'''
+					)			                   
+				}
+			}
+		}
+	}
+}
